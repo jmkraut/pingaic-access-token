@@ -1,10 +1,13 @@
 {
-  "name": "pingaic-access-token",
+  "name": "@jmkraut/pingaic-access-token",
+  "displayName": "Ping AIC Service Account Auth",
+  "description": "Authenticate Yaak requests to Ping Advanced Identity Cloud using a service account access token",
   "private": true,
   "version": "0.0.1",
   "scripts": {
     "build": "yaak plugin build",
-    "dev": "yaak plugin dev"
+    "dev": "yaak plugin dev",
+    "test": "vitest --run"
   },
   "devDependencies": {
     "@types/node": "^24.10.1",
