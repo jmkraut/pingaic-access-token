@@ -50,7 +50,7 @@ export const plugin: PluginDefinition = {
       },
     ],
     async onApply(ctx, { values }) {
-      const token = await getAccessToken(ctx.store, configFromValues(values));
+      const token = await getAccessToken(ctx, configFromValues(values));
       return { setHeaders: [{ name: "Authorization", value: `Bearer ${token}` }] };
     },
     actions: [
@@ -59,7 +59,7 @@ export const plugin: PluginDefinition = {
         icon: "copy",
         async onSelect(ctx, { values }) {
           try {
-            const token = await getAccessToken(ctx.store, configFromValues(values));
+            const token = await getAccessToken(ctx, configFromValues(values));
             await ctx.clipboard.copyText(token);
             await ctx.toast.show({ message: "Access token copied", color: "success" });
           } catch (err) {
@@ -71,7 +71,7 @@ export const plugin: PluginDefinition = {
         label: "Clear Cached Token",
         icon: "trash",
         async onSelect(ctx, { values }) {
-          const deleted = await clearCachedToken(ctx.store, configFromValues(values));
+          const deleted = await clearCachedToken(ctx, configFromValues(values));
           await ctx.toast.show({
             message: deleted ? "Cached token cleared" : "No cached token to clear",
             color: deleted ? "success" : "info",

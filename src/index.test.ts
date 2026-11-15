@@ -2,7 +2,7 @@ import { generateKeyPairSync, verify } from "node:crypto";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { beforeEach, describe, expect, test, vi } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 import { plugin } from "./index";
 import {
   buildAssertion,
@@ -12,7 +12,7 @@ import {
   loadPrivateKey,
   normalizeTenantFqdn,
   type TokenConfig,
-  type TokenStore,
+  type TokenContext,
 } from "./token";
 
 const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
@@ -32,27 +32,41 @@ function config(overrides: Partial<TokenConfig> = {}): TokenConfig {
   };
 }
 
-function memoryStore(): TokenStore & { data: Map<string, unknown> } {
-  const data = new Map<string, unknown>();
+type SendArgs = Parameters<TokenContext["httpRequest"]["send"]>[0];
+type Sent = Awaited<ReturnType<TokenContext["httpRequest"]["send"]>>;
+
+function sent(status: number, body: string, error: string | null = null): Sent {
   return {
-    data,
-    async get<T>(key: string) {
-      return data.get(key) as T | undefined;
-    },
-    async set<T>(key: string, value: T) {
-      data.set(key, value);
-    },
-    async delete(key: string) {
-      return data.delete(key);
-    },
-  };
+    httpResponse: { status, error },
+    body: { text: async () => body },
+  } as unknown as Sent;
 }
 
-function tokenResponse(token: string, status = 200) {
-  return new Response(
+function tokenResponse(token: string) {
+  return sent(
+    200,
     JSON.stringify({ access_token: token, scope: "fr:am:* fr:idm:*", token_type: "Bearer", expires_in: 899 }),
-    { status, headers: { "Content-Type": "application/json" } },
   );
+}
+
+function mockContext(send: (args: SendArgs) => Promise<Sent>) {
+  const data = new Map<string, unknown>();
+  const sendMock = vi.fn(send);
+  const ctx: TokenContext = {
+    store: {
+      async get<T>(key: string) {
+        return data.get(key) as T | undefined;
+      },
+      async set<T>(key: string, value: T) {
+        data.set(key, value);
+      },
+      async delete(key: string) {
+        return data.delete(key);
+      },
+    },
+    httpRequest: { send: sendMock },
+  };
+  return { ctx, data, sendMock };
 }
 
 function decodePart(part: string) {
@@ -109,69 +123,77 @@ describe("buildAssertion", () => {
 });
 
 describe("getAccessToken", () => {
-  let store: ReturnType<typeof memoryStore>;
-  beforeEach(() => {
-    store = memoryStore();
-  });
-
-  test("posts a JWT bearer grant to the tenant token endpoint", async () => {
-    const fetchMock = vi.fn(async () => tokenResponse("tok-1"));
-    const token = await getAccessToken(store, config(), fetchMock);
+  test("posts a JWT bearer grant to the tenant token endpoint through Yaak", async () => {
+    const { ctx, sendMock } = mockContext(async () => tokenResponse("tok-1"));
+    const token = await getAccessToken(ctx, config());
 
     expect(token).toBe("tok-1");
-    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
-    expect(url).toBe(ENDPOINT);
-    const body = new URLSearchParams(init.body as string);
-    expect(body.get("client_id")).toBe("service-account");
-    expect(body.get("grant_type")).toBe("urn:ietf:params:oauth:grant-type:jwt-bearer");
-    expect(body.get("scope")).toBe("fr:am:* fr:idm:*");
-    expect(decodePart(body.get("assertion")!.split(".")[1]!).aud).toBe(ENDPOINT);
+    const { httpRequest } = sendMock.mock.calls[0]![0];
+    expect(httpRequest).toMatchObject({
+      method: "POST",
+      url: ENDPOINT,
+      bodyType: "application/x-www-form-urlencoded",
+      authenticationType: "none",
+    });
+    const form = Object.fromEntries(
+      (httpRequest.body!.form as { name: string; value: string }[]).map((p) => [p.name, p.value]),
+    );
+    expect(form).toMatchObject({
+      client_id: "service-account",
+      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+      scope: "fr:am:* fr:idm:*",
+    });
+    expect(decodePart(form.assertion!.split(".")[1]!).aud).toBe(ENDPOINT);
   });
 
   test("reuses a cached token until it nears expiry", async () => {
-    const fetchMock = vi.fn(async () => tokenResponse("tok-1"));
-    await getAccessToken(store, config(), fetchMock);
+    const { ctx, data, sendMock } = mockContext(async () => tokenResponse("tok-1"));
+    await getAccessToken(ctx, config());
     // Scope order/whitespace differences hit the same cache entry.
-    await getAccessToken(store, config({ scope: "fr:idm:*   fr:am:*" }), fetchMock);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await getAccessToken(ctx, config({ scope: "fr:idm:*   fr:am:*" }));
+    expect(sendMock).toHaveBeenCalledTimes(1);
 
-    const key = cacheKey(config());
-    store.data.set(key, { accessToken: "old", expiresAt: Date.now() + 30_000 });
-    fetchMock.mockImplementationOnce(async () => tokenResponse("tok-2"));
-    expect(await getAccessToken(store, config(), fetchMock)).toBe("tok-2");
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    data.set(cacheKey(config()), { accessToken: "old", expiresAt: Date.now() + 30_000 });
+    sendMock.mockImplementationOnce(async () => tokenResponse("tok-2"));
+    expect(await getAccessToken(ctx, config())).toBe("tok-2");
+    expect(sendMock).toHaveBeenCalledTimes(2);
   });
 
   test("never stores the private key", async () => {
-    await getAccessToken(store, config(), async () => tokenResponse("tok-1"));
-    expect(JSON.stringify([...store.data])).not.toContain(JSON.parse(jwk).d);
+    const { ctx, data } = mockContext(async () => tokenResponse("tok-1"));
+    await getAccessToken(ctx, config());
+    expect(JSON.stringify([...data])).not.toContain(JSON.parse(jwk).d);
   });
 
   test("shares one in-flight request between concurrent callers", async () => {
-    const fetchMock = vi.fn(async () => tokenResponse("tok-1"));
-    const tokens = await Promise.all([1, 2, 3].map(() => getAccessToken(store, config(), fetchMock)));
+    const { ctx, sendMock } = mockContext(async () => tokenResponse("tok-1"));
+    const tokens = await Promise.all([1, 2, 3].map(() => getAccessToken(ctx, config())));
     expect(tokens).toEqual(["tok-1", "tok-1", "tok-1"]);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(sendMock).toHaveBeenCalledTimes(1);
   });
 
   test("surfaces the OAuth error description", async () => {
-    const fetchMock = vi.fn(
-      async () =>
-        new Response(JSON.stringify({ error: "invalid_scope", error_description: "Unknown/invalid scope(s)" }), {
-          status: 400,
-        }),
+    const { ctx, data } = mockContext(async () =>
+      sent(400, JSON.stringify({ error: "invalid_scope", error_description: "Unknown/invalid scope(s)" })),
     );
-    await expect(getAccessToken(store, config(), fetchMock)).rejects.toThrow(
+    await expect(getAccessToken(ctx, config())).rejects.toThrow(
       "Ping AIC token request failed (400): invalid_scope: Unknown/invalid scope(s)",
     );
-    expect(store.data.size).toBe(0);
+    expect(data.size).toBe(0);
+  });
+
+  test("surfaces connection errors from Yaak", async () => {
+    const { ctx } = mockContext(async () => sent(0, "", "dns error: no such host"));
+    await expect(getAccessToken(ctx, config())).rejects.toThrow(
+      "Ping AIC token request failed: dns error: no such host",
+    );
   });
 
   test("clearCachedToken forces a new request", async () => {
-    const fetchMock = vi.fn(async () => tokenResponse("tok-1"));
-    await getAccessToken(store, config(), fetchMock);
-    expect(await clearCachedToken(store, config())).toBe(true);
-    await getAccessToken(store, config(), fetchMock);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const { ctx, sendMock } = mockContext(async () => tokenResponse("tok-1"));
+    await getAccessToken(ctx, config());
+    expect(await clearCachedToken(ctx, config())).toBe(true);
+    await getAccessToken(ctx, config());
+    expect(sendMock).toHaveBeenCalledTimes(2);
   });
 });

@@ -1,6 +1,7 @@
 import { createHash, createPrivateKey, randomUUID, sign, type KeyObject } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
+import type { Context, HttpRequest } from "@yaakapp/api";
 
 // Service account access tokens have a fixed 899s lifetime. Refresh a little early so a
 // token never expires between being applied and the request reaching the server.
@@ -20,11 +21,10 @@ export interface CachedToken {
   scope?: string;
 }
 
-export interface TokenStore {
-  get<T>(key: string): Promise<T | undefined>;
-  set<T>(key: string, value: T): Promise<void>;
-  delete(key: string): Promise<boolean>;
-}
+/** The parts of the plugin context used to fetch and cache tokens. */
+export type TokenContext = Pick<Context, "store"> & {
+  httpRequest: Pick<Context["httpRequest"], "send">;
+};
 
 /** Accepts a bare FQDN or a pasted URL and returns just the host, e.g. `openam-x.forgeblocks.com`. */
 export function normalizeTenantFqdn(input: string): string {
@@ -112,10 +112,7 @@ function base64url(input: string | Buffer): string {
   return Buffer.from(input).toString("base64url");
 }
 
-export async function requestAccessToken(
-  config: TokenConfig,
-  fetchImpl: typeof fetch = fetch,
-): Promise<CachedToken> {
+export async function requestAccessToken(ctx: TokenContext, config: TokenConfig): Promise<CachedToken> {
   const tenantFqdn = normalizeTenantFqdn(config.tenantFqdn);
   const serviceAccountId = config.serviceAccountId.trim();
   const scope = normalizeScope(config.scope);
@@ -127,19 +124,34 @@ export async function requestAccessToken(
   const key = await loadPrivateKey(config.privateKey);
   const assertion = buildAssertion(key, serviceAccountId, endpoint);
 
-  const requestedAt = Date.now();
-  const response = await fetchImpl(endpoint, {
+  // Sent through Yaak so its proxy, CA and client certificate settings apply. The request
+  // has no id, so it is never saved to any request's history.
+  const httpRequest: Partial<HttpRequest> = {
     method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
-    body: new URLSearchParams({
-      client_id: "service-account",
-      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
-      assertion,
-      scope,
-    }).toString(),
-  });
+    url: endpoint,
+    bodyType: "application/x-www-form-urlencoded",
+    body: {
+      form: [
+        { name: "client_id", value: "service-account" },
+        { name: "grant_type", value: "urn:ietf:params:oauth:grant-type:jwt-bearer" },
+        { name: "assertion", value: assertion },
+        { name: "scope", value: scope },
+      ],
+    },
+    headers: [
+      { name: "Content-Type", value: "application/x-www-form-urlencoded" },
+      { name: "Accept", value: "application/json" },
+    ],
+    authenticationType: "none", // Don't inherit workspace auth
+  };
 
-  const text = await response.text();
+  const requestedAt = Date.now();
+  const { httpResponse, body: responseBody } = await ctx.httpRequest.send({ httpRequest });
+  if (httpResponse.error) {
+    throw new Error(`Ping AIC token request failed: ${httpResponse.error}`);
+  }
+
+  const text = await responseBody.text();
   let body: Record<string, unknown> = {};
   try {
     body = JSON.parse(text);
@@ -147,11 +159,11 @@ export async function requestAccessToken(
     // Non-JSON error pages are reported as raw text below.
   }
 
-  if (!response.ok) {
+  if (httpResponse.status < 200 || httpResponse.status >= 300) {
     const detail =
       [body.error, body.error_description].filter((v) => typeof v === "string").join(": ") ||
       text.slice(0, 500);
-    throw new Error(`Ping AIC token request failed (${response.status}): ${detail}`);
+    throw new Error(`Ping AIC token request failed (${httpResponse.status}): ${detail}`);
   }
 
   if (typeof body.access_token !== "string") {
@@ -179,22 +191,18 @@ export function cacheKey(config: TokenConfig): string {
 // Requests applied in parallel share a single in-flight token fetch.
 const inFlight = new Map<string, Promise<CachedToken>>();
 
-export async function getAccessToken(
-  store: TokenStore,
-  config: TokenConfig,
-  fetchImpl: typeof fetch = fetch,
-): Promise<string> {
+export async function getAccessToken(ctx: TokenContext, config: TokenConfig): Promise<string> {
   const key = cacheKey(config);
-  const cached = await store.get<CachedToken>(key);
+  const cached = await ctx.store.get<CachedToken>(key);
   if (cached && cached.expiresAt - EXPIRY_BUFFER_MS > Date.now()) {
     return cached.accessToken;
   }
 
   let pending = inFlight.get(key);
   if (!pending) {
-    pending = requestAccessToken(config, fetchImpl)
+    pending = requestAccessToken(ctx, config)
       .then(async (token) => {
-        await store.set(key, token);
+        await ctx.store.set(key, token);
         return token;
       })
       .finally(() => inFlight.delete(key));
@@ -203,8 +211,8 @@ export async function getAccessToken(
   return (await pending).accessToken;
 }
 
-export async function clearCachedToken(store: TokenStore, config: TokenConfig): Promise<boolean> {
-  return store.delete(cacheKey(config));
+export async function clearCachedToken(ctx: Pick<Context, "store">, config: TokenConfig): Promise<boolean> {
+  return ctx.store.delete(cacheKey(config));
 }
 
 export function errorMessage(err: unknown): string {

@@ -31,7 +31,8 @@ Any field can use Yaak environment variables, for example `${[ PING_TENANT ]}`.
 
 - A JWT with `iss`/`sub` set to the service account ID and `aud` set to the token endpoint is
   signed with RS256. It is exchanged at
-  `https://<tenant>:443/am/oauth2/access_token` using `client_id=service-account`.
+  `https://<tenant>:443/am/oauth2/access_token` using `client_id=service-account`. The token
+  request goes through Yaak, so your proxy and certificate settings apply.
 - The token is cached in the plugin store. The cache key is the tenant, service account and scopes;
   scope order doesn't matter. Tokens last a fixed 899 seconds and are refreshed 60 seconds before
   they expire. The private key is never cached.
