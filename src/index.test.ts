@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test, vi } from "vitest";
-import { plugin } from "./index";
+import { configFromValues, plugin } from "./index";
 import {
   buildAssertion,
   cacheKey,
@@ -76,6 +76,13 @@ function decodePart(part: string) {
 describe("plugin", () => {
   test("registers an authentication plugin", () => {
     expect(plugin.authentication?.name).toBe("pingaic-service-account");
+  });
+
+  test("applies the scope default when the field was never edited", () => {
+    // Actions receive raw saved values, without the input defaults Yaak applies for onApply.
+    const scopeArg = plugin.authentication?.args.find((a) => "name" in a && a.name === "scope");
+    expect(configFromValues({}).scope).toBe(scopeArg && "defaultValue" in scopeArg ? scopeArg.defaultValue : null);
+    expect(configFromValues({ scope: "fr:idc:esv:*" }).scope).toBe("fr:idc:esv:*");
   });
 });
 

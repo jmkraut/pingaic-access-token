@@ -1,12 +1,16 @@
 import type { PluginDefinition } from "@yaakapp/api";
 import { clearCachedToken, errorMessage, getAccessToken, type TokenConfig } from "./token";
 
-function configFromValues(values: Record<string, unknown>): TokenConfig {
+const DEFAULT_SCOPE = "fr:am:* fr:idm:*";
+
+// Yaak fills in input defaults before onApply but not before actions, and a field that was
+// never edited isn't saved, so defaults are applied here too to keep both paths consistent.
+export function configFromValues(values: Record<string, unknown>): TokenConfig {
   return {
     tenantFqdn: String(values.tenantFqdn ?? ""),
     serviceAccountId: String(values.serviceAccountId ?? ""),
     privateKey: String(values.privateKey ?? ""),
-    scope: String(values.scope ?? ""),
+    scope: String(values.scope ?? DEFAULT_SCOPE),
   };
 }
 
@@ -44,7 +48,7 @@ export const plugin: PluginDefinition = {
         type: "text",
         name: "scope",
         label: "Scopes",
-        defaultValue: "fr:am:* fr:idm:*",
+        defaultValue: DEFAULT_SCOPE,
         description:
           "Space-separated. Must match, or be a subset of, the scopes granted to the service account.",
       },
