@@ -7,6 +7,14 @@ It uses a service account ID and private key to get an access token, caches it, 
 
 Use it to call AIC REST APIs such as `/am/*`, `/openidm/*` and `/environment/*`.
 
+## Installation
+
+Install it from Yaak's plugin directory, or with the [Yaak CLI](https://yaak.app/docs/plugin-development/plugins-quick-start):
+
+```sh
+yaak plugin install @jmkraut/pingaic-access-token
+```
+
 ## Setup
 
 1. In the AIC admin console, create a service account. Download its private key (`.jwk`) and note
@@ -33,13 +41,11 @@ Any field can use Yaak environment variables, for example `${[ PING_TENANT ]}`.
   signed with RS256. It is exchanged at
   `https://<tenant>:443/am/oauth2/access_token` using `client_id=service-account`. The token
   request goes through Yaak, so your proxy and certificate settings apply.
-- The token is cached in the plugin store. The cache key is the tenant, service account and scopes;
-  scope order doesn't matter. Tokens last a fixed 899 seconds and are refreshed 60 seconds before
-  they expire. The private key is never cached.
+- The token is cached in Yaak's plugin store. The cache key is the tenant, service account and
+  scopes; scope order doesn't matter. Tokens last a fixed 899 seconds and are refreshed 60 seconds
+  before they expire. The private key is never cached; the token itself is stored as plain text.
 - Requests sent at the same moment share one token request.
 - If AIC grants fewer scopes than you requested, a warning toast names the missing ones.
-- The cached token is stored unencrypted in Yaak's plugin store, like the built-in OAuth 2.0
-  plugin's tokens. It expires after 15 minutes.
 - Lines starting with `[pingaic]` in Yaak's plugin log show whether each request used a cached
   token or fetched a new one.
 
@@ -58,10 +64,12 @@ From the auth tab's menu:
 
 ## Development
 
-The plugin is built and published with the [Yaak CLI](https://yaak.app/docs/plugin-development/plugins-quick-start)
+The plugin is built with the [Yaak CLI](https://yaak.app/docs/plugin-development/plugins-quick-start)
 (`npm install -g @yaakapp/cli`).
 
 ```sh
+git clone https://github.com/jmkraut/pingaic-access-token.git
+cd pingaic-access-token
 yaak plugin dev       # rebuild on every change
 yaak plugin build     # one-off build into build/
 ```
@@ -76,12 +84,3 @@ npm install
 npm test              # vitest
 npm run typecheck     # tsc; yaak plugin build doesn't check types
 ```
-
-## Publishing
-
-```sh
-yaak auth login
-yaak plugin publish
-```
-
-Increase `version` in `package.json` before each publish.
