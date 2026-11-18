@@ -46,6 +46,8 @@ Any field can use Yaak environment variables, for example `${[ PING_TENANT ]}`.
   before they expire. The private key is never cached; the token itself is stored as plain text.
 - Requests sent at the same moment share one token request.
 - If AIC grants fewer scopes than you requested, a warning toast names the missing ones.
+- A banner under the fields shows whether a token is cached, when it expires, and which scopes
+  were granted.
 - Lines starting with `[pingaic]` in Yaak's plugin log show whether each request used a cached
   token or fetched a new one.
 

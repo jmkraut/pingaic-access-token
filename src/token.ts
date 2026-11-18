@@ -229,8 +229,8 @@ const inFlight = new Map<string, Promise<CachedToken>>();
 export async function getAccessToken(ctx: TokenContext, config: TokenConfig): Promise<string> {
   const key = cacheKey(config);
   // Anything malformed (e.g. written by another version of this plugin) is treated as a miss.
-  const cached = await ctx.store.get<unknown>(key);
-  if (isCachedToken(cached) && cached.expiresAt - EXPIRY_BUFFER_MS > Date.now()) {
+  const cached = await readCachedToken(ctx, config);
+  if (cached && cached.expiresAt - EXPIRY_BUFFER_MS > Date.now()) {
     const remainingS = Math.round((cached.expiresAt - Date.now()) / 1000);
     console.log(`${LOG_PREFIX} Using cached access token, expires in ${remainingS}s`);
     return cached.accessToken;
@@ -247,6 +247,50 @@ export async function getAccessToken(ctx: TokenContext, config: TokenConfig): Pr
     inFlight.set(key, pending);
   }
   return (await pending).accessToken;
+}
+
+/** The cached token for this config, if there is a well-formed one (expired or not). */
+export async function readCachedToken(
+  ctx: Pick<Context, "store">,
+  config: TokenConfig,
+): Promise<CachedToken | undefined> {
+  const cached = await ctx.store.get<unknown>(cacheKey(config));
+  return isCachedToken(cached) ? cached : undefined;
+}
+
+export interface TokenStatus {
+  color: "success" | "notice" | "secondary";
+  content: string;
+}
+
+/** Describes the cached token for the status banner in the auth form. */
+export function describeTokenStatus(
+  cached: CachedToken | undefined,
+  requestedScope: string,
+  now = Date.now(),
+): TokenStatus {
+  if (!cached) {
+    return { color: "secondary", content: "No token cached. One will be fetched on the next request." };
+  }
+  const expiresAt = new Date(cached.expiresAt).toLocaleTimeString();
+  if (cached.expiresAt - EXPIRY_BUFFER_MS <= now) {
+    return {
+      color: "notice",
+      content: `Cached token expired at ${expiresAt}. A new one will be fetched on the next request.`,
+    };
+  }
+
+  const minutes = Math.max(1, Math.round((cached.expiresAt - now) / 60_000));
+  const lines = [`Token cached, expires in ${minutes} min (${expiresAt}).`];
+  if (cached.scope !== undefined) {
+    const missing = missingScopes(requestedScope, cached.scope);
+    lines.push(
+      missing.length > 0
+        ? `Granted scopes: \`${cached.scope}\`. **Not granted:** \`${missing.join(" ")}\`.`
+        : `Granted scopes: \`${cached.scope}\`.`,
+    );
+  }
+  return { color: "success", content: lines.join("\n\n") };
 }
 
 export async function clearCachedToken(ctx: Pick<Context, "store">, config: TokenConfig): Promise<boolean> {

@@ -1,5 +1,12 @@
 import type { PluginDefinition } from "@yaakapp/api";
-import { clearCachedToken, errorMessage, getAccessToken, type TokenConfig } from "./token";
+import {
+  clearCachedToken,
+  describeTokenStatus,
+  errorMessage,
+  getAccessToken,
+  readCachedToken,
+  type TokenConfig,
+} from "./token";
 
 const DEFAULT_SCOPE = "fr:am:* fr:idm:*";
 
@@ -51,6 +58,22 @@ export const plugin: PluginDefinition = {
         defaultValue: DEFAULT_SCOPE,
         description:
           "Space-separated. Must match, or be a subset of, the scopes granted to the service account.",
+      },
+      {
+        type: "banner",
+        inputs: [],
+        // Re-evaluated whenever Yaak asks for the form, so it reflects the cache at that moment.
+        async dynamic(ctx, { values }) {
+          const config = configFromValues(values);
+          if (!config.tenantFqdn.trim() || !config.serviceAccountId.trim()) return { hidden: true };
+          try {
+            const status = describeTokenStatus(await readCachedToken(ctx, config), config.scope);
+            return { color: status.color, inputs: [{ type: "markdown", content: status.content }] };
+          } catch {
+            // e.g. an unparseable tenant FQDN; the request itself will report that.
+            return { hidden: true };
+          }
+        },
       },
     ],
     async onApply(ctx, { values }) {

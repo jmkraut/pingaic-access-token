@@ -11,6 +11,8 @@ import {
   getAccessToken,
   loadPrivateKey,
   missingScopes,
+  describeTokenStatus,
+  readCachedToken,
   normalizeTenantFqdn,
   type TokenConfig,
   type TokenContext,
@@ -247,5 +249,62 @@ describe("missingScopes", () => {
   test("ignores order and whitespace", () => {
     expect(missingScopes(" fr:am:*  fr:idm:* ", "fr:idm:* fr:am:*")).toEqual([]);
     expect(missingScopes("fr:am:* fr:idm:* fr:idc:esv:*", "fr:am:*")).toEqual(["fr:idm:*", "fr:idc:esv:*"]);
+  });
+});
+
+describe("describeTokenStatus", () => {
+  const now = 1_000_000_000_000;
+  const scope = "fr:am:* fr:idm:*";
+
+  test("no cached token", () => {
+    expect(describeTokenStatus(undefined, scope, now)).toMatchObject({
+      color: "secondary",
+      content: expect.stringContaining("No token cached"),
+    });
+  });
+
+  test("valid token shows time remaining and granted scopes", () => {
+    const status = describeTokenStatus({ accessToken: "t", expiresAt: now + 12 * 60_000, scope }, scope, now);
+    expect(status.color).toBe("success");
+    expect(status.content).toContain("expires in 12 min");
+    expect(status.content).toContain("Granted scopes: `fr:am:* fr:idm:*`.");
+    expect(status.content).not.toContain("Not granted");
+  });
+
+  test("valid token flags scopes that were not granted", () => {
+    const status = describeTokenStatus({ accessToken: "t", expiresAt: now + 600_000, scope: "fr:am:*" }, scope, now);
+    expect(status.content).toContain("**Not granted:** `fr:idm:*`");
+  });
+
+  test("token inside the refresh window counts as expired", () => {
+    expect(describeTokenStatus({ accessToken: "t", expiresAt: now + 30_000 }, scope, now)).toMatchObject({
+      color: "notice",
+      content: expect.stringContaining("A new one will be fetched"),
+    });
+  });
+});
+
+describe("status banner", () => {
+  type Banner = { dynamic: (ctx: unknown, args: { contextId: string; values: Record<string, unknown> }) => Promise<unknown> };
+  const banner = plugin.authentication!.args.find((a) => a.type === "banner") as unknown as Banner;
+  const values = { tenantFqdn: "openam-x.forgeblocks.com", serviceAccountId: SA_ID };
+
+  test("is hidden until tenant and service account are set", async () => {
+    const { ctx } = mockContext(async () => tokenResponse("tok-1"));
+    expect(await banner.dynamic(ctx, { contextId: "c", values: { tenantFqdn: "x.example.com" } })).toEqual({
+      hidden: true,
+    });
+  });
+
+  test("reflects the cached token, using the default scope when unset", async () => {
+    const { ctx } = mockContext(async () => tokenResponse("tok-1"));
+    expect(await banner.dynamic(ctx, { contextId: "c", values })).toMatchObject({ color: "secondary" });
+
+    await getAccessToken(ctx, configFromValues({ ...values, privateKey: jwk }));
+    expect(await readCachedToken(ctx, configFromValues(values))).toBeDefined();
+    expect(await banner.dynamic(ctx, { contextId: "c", values })).toMatchObject({
+      color: "success",
+      inputs: [{ type: "markdown", content: expect.stringContaining("Token cached") }],
+    });
   });
 });
