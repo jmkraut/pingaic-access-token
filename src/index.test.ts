@@ -10,6 +10,7 @@ import {
   clearCachedToken,
   getAccessToken,
   loadPrivateKey,
+  missingScopes,
   normalizeTenantFqdn,
   type TokenConfig,
   type TokenContext,
@@ -52,6 +53,7 @@ function tokenResponse(token: string) {
 function mockContext(send: (args: SendArgs) => Promise<Sent>) {
   const data = new Map<string, unknown>();
   const sendMock = vi.fn(send);
+  const toastMock = vi.fn(async () => {});
   const ctx: TokenContext = {
     store: {
       async get<T>(key: string) {
@@ -65,8 +67,9 @@ function mockContext(send: (args: SendArgs) => Promise<Sent>) {
       },
     },
     httpRequest: { send: sendMock },
+    toast: { show: toastMock },
   };
-  return { ctx, data, sendMock };
+  return { ctx, data, sendMock, toastMock };
 }
 
 function decodePart(part: string) {
@@ -113,6 +116,13 @@ describe("loadPrivateKey", () => {
 
   test("reports a missing file clearly", async () => {
     await expect(loadPrivateKey("/does/not/exist.jwk")).rejects.toThrow(/could not be read as a file/);
+  });
+
+  test("rejects non-RSA keys", async () => {
+    const ec = generateKeyPairSync("ec", { namedCurve: "P-256" }).privateKey;
+    await expect(loadPrivateKey(JSON.stringify(ec.export({ format: "jwk" })))).rejects.toThrow(
+      "Private key from pasted JWK is ec, but Ping AIC service accounts use RSA keys",
+    );
   });
 });
 
@@ -202,5 +212,40 @@ describe("getAccessToken", () => {
     expect(await clearCachedToken(ctx, config())).toBe(true);
     await getAccessToken(ctx, config());
     expect(sendMock).toHaveBeenCalledTimes(2);
+  });
+
+  test.each([
+    ["missing token", { expiresAt: Date.now() + 600_000 }],
+    ["empty token", { accessToken: "", expiresAt: Date.now() + 600_000 }],
+    ["missing expiry", { accessToken: "old" }],
+    ["non-object", "old"],
+  ])("refetches when the cached entry is malformed (%s)", async (_, entry) => {
+    const { ctx, data, sendMock } = mockContext(async () => tokenResponse("tok-1"));
+    data.set(cacheKey(config()), entry);
+    expect(await getAccessToken(ctx, config())).toBe("tok-1");
+    expect(sendMock).toHaveBeenCalledTimes(1);
+  });
+
+  test("warns when AIC grants fewer scopes than requested", async () => {
+    const { ctx, toastMock } = mockContext(async () =>
+      sent(200, JSON.stringify({ access_token: "tok-1", scope: "fr:am:*", expires_in: 899 })),
+    );
+    expect(await getAccessToken(ctx, config())).toBe("tok-1");
+    expect(toastMock).toHaveBeenCalledWith(
+      expect.objectContaining({ color: "warning", message: expect.stringContaining("fr:idm:*") }),
+    );
+  });
+
+  test("does not warn when all requested scopes are granted", async () => {
+    const { ctx, toastMock } = mockContext(async () => tokenResponse("tok-1"));
+    await getAccessToken(ctx, config());
+    expect(toastMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("missingScopes", () => {
+  test("ignores order and whitespace", () => {
+    expect(missingScopes(" fr:am:*  fr:idm:* ", "fr:idm:* fr:am:*")).toEqual([]);
+    expect(missingScopes("fr:am:* fr:idm:* fr:idc:esv:*", "fr:am:*")).toEqual(["fr:idm:*", "fr:idc:esv:*"]);
   });
 });

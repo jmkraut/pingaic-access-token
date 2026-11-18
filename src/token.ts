@@ -22,9 +22,11 @@ export interface CachedToken {
 }
 
 /** The parts of the plugin context used to fetch and cache tokens. */
-export type TokenContext = Pick<Context, "store"> & {
+export type TokenContext = Pick<Context, "store" | "toast"> & {
   httpRequest: Pick<Context["httpRequest"], "send">;
 };
+
+const LOG_PREFIX = "[pingaic]";
 
 /** Accepts a bare FQDN or a pasted URL and returns just the host, e.g. `openam-x.forgeblocks.com`. */
 export function normalizeTenantFqdn(input: string): string {
@@ -72,14 +74,22 @@ export async function loadPrivateKey(input: string): Promise<KeyObject> {
 }
 
 function parseKey(text: string, source: string): KeyObject {
+  let key: KeyObject;
   try {
-    if (text.startsWith("{")) {
-      return createPrivateKey({ key: JSON.parse(text), format: "jwk" });
-    }
-    return createPrivateKey(text);
+    key = text.startsWith("{")
+      ? createPrivateKey({ key: JSON.parse(text), format: "jwk" })
+      : createPrivateKey(text);
   } catch (err) {
     throw new Error(`Failed to parse private key from ${source}: ${errorMessage(err)}`);
   }
+  // Node would happily sign with a non-RSA key, producing a JWT whose RS256 header
+  // doesn't match its signature and an unhelpful rejection from AIC.
+  if (key.asymmetricKeyType !== "rsa") {
+    throw new Error(
+      `Private key from ${source} is ${key.asymmetricKeyType ?? "unknown"}, but Ping AIC service accounts use RSA keys`,
+    );
+  }
+  return key;
 }
 
 function expandHome(path: string): string {
@@ -145,6 +155,7 @@ export async function requestAccessToken(ctx: TokenContext, config: TokenConfig)
     authenticationType: "none", // Don't inherit workspace auth
   };
 
+  console.log(`${LOG_PREFIX} Fetching access token from ${tenantFqdn} scope="${scope}"`);
   const requestedAt = Date.now();
   const { httpResponse, body: responseBody } = await ctx.httpRequest.send({ httpRequest });
   if (httpResponse.error) {
@@ -171,11 +182,35 @@ export async function requestAccessToken(ctx: TokenContext, config: TokenConfig)
   }
 
   const expiresIn = typeof body.expires_in === "number" ? body.expires_in : ASSERTION_LIFETIME_S;
-  return {
-    accessToken: body.access_token,
-    expiresAt: requestedAt + expiresIn * 1000,
-    scope: typeof body.scope === "string" ? body.scope : undefined,
-  };
+  const grantedScope = typeof body.scope === "string" ? body.scope : undefined;
+  console.log(`${LOG_PREFIX} Got access token, expires in ${expiresIn}s`);
+
+  const missing = grantedScope === undefined ? [] : missingScopes(scope, grantedScope);
+  if (missing.length > 0) {
+    const message = `Ping AIC did not grant scope(s): ${missing.join(" ")}. Requests needing them will be rejected.`;
+    console.warn(`${LOG_PREFIX} ${message}`);
+    await ctx.toast.show({ message, color: "warning", icon: "alert_triangle" });
+  }
+
+  return { accessToken: body.access_token, expiresAt: requestedAt + expiresIn * 1000, scope: grantedScope };
+}
+
+/** Requested scopes that are absent from the granted (space-separated) scope string. */
+export function missingScopes(requested: string, granted: string): string[] {
+  const grantedSet = new Set(normalizeScope(granted).split(" "));
+  return normalizeScope(requested)
+    .split(" ")
+    .filter((s) => s && !grantedSet.has(s));
+}
+
+function isCachedToken(value: unknown): value is CachedToken {
+  const v = value as Partial<CachedToken> | null | undefined;
+  return (
+    typeof v?.accessToken === "string" &&
+    v.accessToken.length > 0 &&
+    typeof v.expiresAt === "number" &&
+    Number.isFinite(v.expiresAt)
+  );
 }
 
 /** Identifies a token by tenant, account and scope; the key itself never touches the store. */
@@ -193,8 +228,11 @@ const inFlight = new Map<string, Promise<CachedToken>>();
 
 export async function getAccessToken(ctx: TokenContext, config: TokenConfig): Promise<string> {
   const key = cacheKey(config);
-  const cached = await ctx.store.get<CachedToken>(key);
-  if (cached && cached.expiresAt - EXPIRY_BUFFER_MS > Date.now()) {
+  // Anything malformed (e.g. written by another version of this plugin) is treated as a miss.
+  const cached = await ctx.store.get<unknown>(key);
+  if (isCachedToken(cached) && cached.expiresAt - EXPIRY_BUFFER_MS > Date.now()) {
+    const remainingS = Math.round((cached.expiresAt - Date.now()) / 1000);
+    console.log(`${LOG_PREFIX} Using cached access token, expires in ${remainingS}s`);
     return cached.accessToken;
   }
 
