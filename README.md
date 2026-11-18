@@ -37,6 +37,16 @@ Any field can use Yaak environment variables, for example `${[ PING_TENANT ]}`.
   scope order doesn't matter. Tokens last a fixed 899 seconds and are refreshed 60 seconds before
   they expire. The private key is never cached.
 - Requests sent at the same moment share one token request.
+- If AIC grants fewer scopes than you requested, a warning toast names the missing ones.
+- The cached token is stored unencrypted in Yaak's plugin store, like the built-in OAuth 2.0
+  plugin's tokens. It expires after 15 minutes.
+- Lines starting with `[pingaic]` in Yaak's plugin log show whether each request used a cached
+  token or fetched a new one.
+
+## Limitations
+
+- An auth plugin can't see the API's response. If AIC revokes a token early, requests fail with
+  401 until it expires or you run **Clear Cached Token**.
 
 ## Actions
 
@@ -48,9 +58,30 @@ From the auth tab's menu:
 
 ## Development
 
+The plugin is built and published with the [Yaak CLI](https://yaak.app/docs/plugin-development/plugins-quick-start)
+(`npm install -g @yaakapp/cli`).
+
+```sh
+yaak plugin dev       # rebuild on every change
+yaak plugin build     # one-off build into build/
+```
+
+To load your local copy, add this folder in Yaak under **Settings → Plugins**. Yaak reloads the
+plugin after each rebuild.
+
+Building doesn't need `npm install`. The tests and type-check do:
+
 ```sh
 npm install
-npm run dev     # rebuild on change; add this folder in Yaak under Settings → Plugins
-npm test
-npm run build
+npm test              # vitest
+npm run typecheck     # tsc; yaak plugin build doesn't check types
 ```
+
+## Publishing
+
+```sh
+yaak auth login
+yaak plugin publish
+```
+
+Increase `version` in `package.json` before each publish.
